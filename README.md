@@ -12,4 +12,5 @@ DSaS Content
 ![alt text](https://github.com/mnovovil/EthereumTokenRecommender/blob/main/DSaS%20Tools.png)
 
 Output
+
 ![alt text](https://github.com/mnovovil/EthereumTokenRecommender-Spark-/blob/main/Output.png)
