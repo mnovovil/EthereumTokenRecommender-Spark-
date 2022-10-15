@@ -9,7 +9,7 @@ Project Diagram.
 ![alt text](https://github.com/mnovovil/EthereumTokenRecommender/blob/main/TokenRecommender.png)
 
 DSaS Content
-![alt text](https://github.com/mnovovil/EthereumTokenRecommender/blob/main/DSaS%20Tools.png)
+<img src="https://github.com/mnovovil/EthereumTokenRecommender/blob/main/DSaS%20Tools.png" width="50%" height="50%">
 
 Output
 
