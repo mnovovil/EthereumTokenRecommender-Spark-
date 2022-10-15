@@ -3,4 +3,8 @@ End-To-End Token Recommender on the Ethereum Blockchain (ERC-20 Tokens) based on
 
 Used AWS databricks, PySpark and SQL for recommending and querying the data. Registered the model in the model registry and deployed the model to production based on minimal threshold. 
 
+Project Diagram
 ![alt text](https://github.com/mnovovil/EthereumTokenRecommender/blob/main/TokenRecommender.png)
+
+DSaS Content
+![alt text](https://github.com/mnovovil/EthereumTokenRecommender/blob/main/DSaS%20Tools.png)
