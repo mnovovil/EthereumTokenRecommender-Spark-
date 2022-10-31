@@ -38,60 +38,52 @@
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## Q: What is the maximum block number and date of block in the database 1
-
--- COMMAND ----------
-
--- MAGIC %python
--- MAGIC display(spark.sql("""SELECT number, CAST(timestamp AS TIMESTAMP) FROM blocks 
--- MAGIC     WHERE number IN (SELECT MAX(number) FROM blocks)"""))
-
--- COMMAND ----------
-
--- MAGIC %md
--- MAGIC ## Q: At what block did the first ERC20 transfer happen? 2
-
--- COMMAND ----------
-
--- MAGIC %python
+-- MAGIC ## Q: What is the maximum block number and date of block in the database
 -- MAGIC 
--- MAGIC sql_statement = """
--- MAGIC SELECT MIN(block_number) FROM token_transfers
--- MAGIC """
--- MAGIC df = spark.sql(sql_statement)
--- MAGIC display(df)
+-- MAGIC ## A: The max block number is 14044000 on 2022-01-20
+
+-- COMMAND ----------
+
+SELECT 
+  number, CAST(timestamp AS TIMESTAMP) 
+FROM blocks 
+WHERE number IN (SELECT MAX(number) FROM blocks)
 
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## Q: How many ERC20 compatible contracts are there on the blockchain? 3
+-- MAGIC ## Q: At what block did the first ERC20 transfer happen?
+-- MAGIC 
+-- MAGIC ## A: 913198
 
 -- COMMAND ----------
 
--- This assumes that the token addresses
--- in the token_transfer table are all 
--- ERC20 contract addresses
 SELECT 
-  COUNT(DISTINCT token_address)
-FROM token_transfers
+  MIN(TT.block_number)
+FROM token_transfers TT
+INNER JOIN silver_contracts SC ON SC.address = TT.token_address
+WHERE SC.is_erc20 = "True"
 
 -- COMMAND ----------
 
--- This assumes all tokens are ERC20
-SELECT COUNT(DISTINCT address) FROM tokens
+-- MAGIC %md
+-- MAGIC ## Q: How many ERC20 compatible contracts are there on the blockchain?
+-- MAGIC 
+-- MAGIC ## A: 181937
 
 -- COMMAND ----------
 
--- Count unique valid etheruem token [contract] addresses
 SELECT 
-  COUNT(DISTINCT contract_address)
-FROM token_prices_usd 
-WHERE asset_platform_id = 'ethereum' AND substr(contract_address, 1, 2) = '0x'
+  COUNT(DISTINCT address) 
+FROM silver_contracts 
+WHERE is_erc20 = "True"
 
 -- COMMAND ----------
 
 -- MAGIC %md 
--- MAGIC ## Q: What percentage of transactions are calls to contracts 4
+-- MAGIC ## Q: What percentage of transactions are calls to contracts
+-- MAGIC 
+-- MAGIC ## A: 45.7%
 
 -- COMMAND ----------
 
@@ -105,7 +97,7 @@ LEFT JOIN contracts C ON C.address = T.to_address
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## Q: What are the top 100 tokens based on transfer count? 5
+-- MAGIC ## Q: What are the top 100 tokens based on transfer count?
 
 -- COMMAND ----------
 
@@ -119,8 +111,10 @@ LIMIT 100
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## Q: What fraction of ERC-20 transfers are sent to new addresses 6
+-- MAGIC ## Q: What fraction of ERC-20 transfers are sent to new addresses
 -- MAGIC (i.e. addresses that have a transfer count of 1 meaning there are no other transfers to this address for this token this is the first)
+-- MAGIC 
+-- MAGIC ## A: 76.4%
 
 -- COMMAND ----------
 
@@ -132,8 +126,10 @@ SELECT
   SUM(CAST((transaction_count = 1) AS INTEGER))/COUNT(1) as percentage
 FROM (
   SELECT 
-    token_address, to_address, COUNT(transaction_hash) as transaction_count
-  FROM token_transfers
+    TT.token_address, TT.to_address, COUNT(TT.transaction_hash) as transaction_count
+  FROM token_transfers TT
+  INNER JOIN silver_contracts SC ON SC.address = TT.token_address
+  WHERE SC.is_erc20 = 'True'
   GROUP BY token_address, to_address
 )
 
@@ -166,8 +162,10 @@ WHERE start_block>=14030000 and block_number = 14030401
 -- COMMAND ----------
 
 -- MAGIC %md
--- MAGIC ## Q: What was the highest transaction throughput in transactions per second? 8
+-- MAGIC ## Q: What was the highest transaction throughput in transactions per second?
 -- MAGIC hint: assume 15 second block time
+-- MAGIC 
+-- MAGIC ## A: 95.4 transactions per second
 
 -- COMMAND ----------
 
@@ -182,12 +180,15 @@ FROM blocks
 
 -- COMMAND ----------
 
--- TBD
+SELECT sum(value)/1000000000000000000 as ether_volume
+FROM transactions
 
 -- COMMAND ----------
 
 -- MAGIC %md
 -- MAGIC ## Q: What is the total gas used in all transactions?
+-- MAGIC 
+-- MAGIC ## A: 93783326139907
 
 -- COMMAND ----------
 
@@ -200,12 +201,16 @@ FROM Receipts
 
 -- MAGIC %md
 -- MAGIC ## Q: Maximum ERC-20 transfers in a single transaction
+-- MAGIC 
+-- MAGIC ## A: The max ERC-20 transfers in a single block is 3016
 
 -- COMMAND ----------
 
 SELECT 
   block_number, COUNT(transaction_hash) transfer_count
-FROM token_transfers
+FROM token_transfers TT
+INNER JOIN silver_contracts SC ON SC.address = TT.token_address
+WHERE SC.is_erc20 = 'True'
 GROUP BY block_number
 ORDER BY COUNT(transaction_hash) DESC
 LIMIT 1
@@ -218,67 +223,34 @@ LIMIT 1
 -- COMMAND ----------
 
 -- MAGIC %python
+-- MAGIC ## Anthony's attempt to INNER JOIN token_transfers and blocks
+-- MAGIC ## and sum values for each token_address for transfers on or before
+-- MAGIC ## date for given wallet address
 -- MAGIC sqlContext.setConf('spark.sql.shuffle.partitions', 'auto')
--- MAGIC from pyspark.sql.functions import col
+-- MAGIC  
+-- MAGIC sql_statement = """
+-- MAGIC SELECT
+-- MAGIC   token_address, 
+-- MAGIC   SUM(
+-- MAGIC     CASE
+-- MAGIC       WHEN from_address = '{wallet_address}' THEN -1*value
+-- MAGIC       ELSE value
+-- MAGIC     END
+-- MAGIC    ) as value
+-- MAGIC FROM token_transfers T
+-- MAGIC INNER JOIN blocks B ON 
+-- MAGIC   B.start_block = T.start_block AND 
+-- MAGIC   B.end_block = T.end_block AND 
+-- MAGIC   B.number = T.block_number AND
+-- MAGIC   to_date(CAST(B.timestamp as TIMESTAMP)) <= '{asof_date}' AND 
+-- MAGIC   (from_address = '{wallet_address}' OR to_address = '{wallet_address}')
+-- MAGIC GROUP BY token_address
+-- MAGIC """.format(
+-- MAGIC     wallet_address = spark.conf.get('wallet.address'), 
+-- MAGIC     asof_date = spark.conf.get('start.date')
+-- MAGIC )
 -- MAGIC 
--- MAGIC sql_statement = "SELECT from_address, token_address, -1*SUM(value) AS Total_From_Value FROM token_transfers T \
--- MAGIC                         INNER JOIN (SELECT number FROM blocks WHERE CAST((timestamp/1e6) AS TIMESTAMP) <= '" + start_date + "') B ON B.number=T.block_number \
--- MAGIC                             GROUP BY from_address, token_address;"
--- MAGIC from_df = spark.sql(sql_statement)
--- MAGIC 
--- MAGIC sql_statement = "SELECT to_address, token_address, SUM(value) AS Total_To_Value FROM token_transfers T \
--- MAGIC                         INNER JOIN (SELECT number FROM blocks WHERE CAST((timestamp/1e6) AS TIMESTAMP) <= '" + start_date + "') B ON B.number=T.block_number \
--- MAGIC                             GROUP BY to_address, token_address;"
--- MAGIC to_df = spark.sql(sql_statement)
--- MAGIC 
--- MAGIC df = from_df.join(to_df, ((from_df.from_address == to_df.to_address) & (from_df.token_address == to_df.token_address)), 'full')
--- MAGIC df = df.na.fill(0, ['Total_To_Value']).na.fill(0, ['Total_From_Value'])
--- MAGIC df = df.withColumn('Balance', col('Total_From_Value')+col('Total_To_Value'))
--- MAGIC 
--- MAGIC display(df)
-
--- COMMAND ----------
-
--- Anthony's attempt to INNER JOIN token_transfers and blocks
--- and sum values for each token_address for transfers on or before
--- date for given wallet address
-%python
-sqlContext.setConf('spark.sql.shuffle.partitions', 'auto')
- 
-sql_statement = """
-SELECT
-  token_address, 
-  SUM(
-    CASE
-      WHEN from_address = '{wallet_address}' THEN -1*value
-      ELSE value
-    END
-   ) as value
-FROM token_transfers T
-INNER JOIN blocks B ON 
-  B.start_block = T.start_block AND 
-  B.end_block = T.end_block AND 
-  B.number = T.block_number AND
-  to_date(CAST(B.timestamp as TIMESTAMP)) <= '{asof_date}' AND 
-  (from_address = '{wallet_address}' OR to_address = '{wallet_address}')
-GROUP BY token_address
-""".format(
-    wallet_address = spark.conf.get('wallet.address'), 
-    asof_date = spark.conf.get('start.date')
-)
-
-display(spark.sql(sql_statement))
-
--- COMMAND ----------
-
--- Debug above by providing individual rows to manually check
-SELECT 
-  token_address, from_address, to_address, 
-  CASE WHEN from_address = '0xf02d7ee27ff9b2279e76a60978bf8cca9b18a3ff' THEN -1*value ELSE value END as value, 
-  to_date(CAST(timestamp AS TIMESTAMP)) as date
-FROM token_transfers T
-INNER JOIN blocks B ON B.number = T.block_number
-WHERE (T.from_address = '0xf02d7ee27ff9b2279e76a60978bf8cca9b18a3ff' OR T.to_address = '0xf02d7ee27ff9b2279e76a60978bf8cca9b18a3ff')
+-- MAGIC display(spark.sql(sql_statement))
 
 -- COMMAND ----------
 
@@ -324,6 +296,8 @@ FROM (
       start_block, 
       end_block
     FROM token_transfers TT
+    INNER JOIN silver_contracts SC ON SC.address = TT.token_address
+    WHERE SC.is_erc20 = 'True'
     GROUP BY block_number, start_block, end_block
   ) TT
   LEFT JOIN blocks B ON B.number = TT.block_number AND B.start_block >= TT.start_block AND B.end_block <= TT.end_block

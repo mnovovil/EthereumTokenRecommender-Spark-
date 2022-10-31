@@ -18,7 +18,7 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Databricks Resources and Naming Conventions1
+# MAGIC ## Databricks Resources and Naming Conventions
 # MAGIC 
 # MAGIC - Each group has a specific Databricks Spark Cluster preconfigured for their group named **Gxx** (all provisioned the same) with 1 driver node and up to 8 workers.
 # MAGIC - Starting code package is [here](https://github.com/lpalum/dscc202-402-spring2022/tree/main/project4-end2end-dia) Each group should move this starting code to their group repo to get started.
@@ -168,4 +168,8 @@ result_dash = dbutils.notebook.run("06 Token Recommender", 0, {"00.Wallet_Addres
 
 # Check for success
 assert json.loads(result_dash)["exit_code"] == "OK", "Token Recommendation Application Failed!" # Check to see that it worked
+
+
+# COMMAND ----------
+
 

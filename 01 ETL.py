@@ -46,28 +46,83 @@ spark.conf.set('start.date', start_date)
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC Applicable Transfers (Transfers that have a USD conversion)
+from delta.tables import DeltaTable
+from pyspark.sql.functions import col, coalesce
+from pyspark.sql.types import _parse_datatype_string, IntegerType
+sqlContext.setConf('spark.sql.shuffle.partitions', 'auto')
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC ## Make Notebook Idempotent
+
+# COMMAND ----------
+
+dbutils.fs.rm('/user/hive/warehouse/g01_db.db/', recurse=True)
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC DROP SCHEMA IF EXISTS G01_DB CASCADE;
+# MAGIC 
+# MAGIC CREATE SCHEMA G01_DB;
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC <img src="https://raw.githubusercontent.com/anthonycor/dscc202-402-spring2022_finalproject/a98d08a03070cfbc4d696f3ea55a2104e52db8a6/project4-end2end-dia/diagram_for_final.png">
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Applicable Transfers (Transfers that have a USD conversion)
+
+# COMMAND ----------
+
+# # Grab all records that have a USD conversion & transfer occured prior to posted date
+# sql_statement = """
+# SELECT TT.*, USD.price_usd, TT.Value*USD.price_usd AS USDValue
+#     FROM (SELECT * FROM blocks WHERE CAST((timestamp/1e6) AS TIMESTAMP) <='""" + start_date + """') AS B
+#     INNER JOIN token_transfers TT ON TT.block_number = B.number
+#     INNER JOIN (SELECT DISTINCT * FROM token_prices_usd WHERE asset_platform_id == 'ethereum') AS USD ON TT.token_address = USD.contract_address
+# """
+# erc_token_transactions = spark.sql(sql_statement)
+
+# expected_ddl_schema = """token_address String, from_address String, to_address String, value Decimal(38,0), transaction_hash String, log_index Long, block_number Long, start_block Long, end_block Long, price_usd Double, USDValue Double"""
+# assert erc_token_transactions.schema == _parse_datatype_string(expected_ddl_schema), "Incorrect Silver ERC20 Transactions schema"
+# print("Assertion passed.")
+
+# erc_token_transactions.write.mode('overwrite').option('mergeSchema', 'true').format('delta').partitionBy('start_block', 'end_block').saveAsTable('G01_db.SilverTable_ERC20Transactions')
+
+# COMMAND ----------
+
+# Grab all records that have a USD conversion & transfer occured prior to posted date
 sql_statement = """
 SELECT TT.*, USD.price_usd, TT.Value*USD.price_usd AS USDValue
-    FROM (SELECT DISTINCT * FROM token_prices_usd) AS USD
-        INNER JOIN token_transfers TT ON TT.token_address = USD.contract_address
-            WHERE USD.asset_platform_id == 'ethereum'
+    FROM token_transfers TT
+    INNER JOIN (SELECT DISTINCT * FROM token_prices_usd WHERE asset_platform_id == 'ethereum') AS USD ON TT.token_address = USD.contract_address
 """
 erc_token_transactions = spark.sql(sql_statement)
-erc_token_transactions.write.mode('overwrite').option('mergeSchema', 'true').partitionBy('start_block', 'end_block').saveAsTable('G01_db.SilverTable_ERC20Transactions')
+
+expected_ddl_schema = """token_address String, from_address String, to_address String, value Decimal(38,0), transaction_hash String, log_index Long, block_number Long, start_block Long, end_block Long, price_usd Double, USDValue Double"""
+assert erc_token_transactions.schema == _parse_datatype_string(expected_ddl_schema), "Incorrect Silver ERC20 Transactions schema"
+print("Assertion passed.")
+
+erc_token_transactions.write.format('delta').partitionBy('start_block', 'end_block').saveAsTable('G01_db.SilverTable_ERC20Transactions')
+
+# COMMAND ----------
+
+spark.sql("OPTIMIZE G01_db.SilverTable_ERC20Transactions ZORDER BY (block_number)")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Lkp_UserWallet
+# MAGIC ## Lkp_UserWallet
 
 # COMMAND ----------
 
-sqlContext.setConf('spark.sql.shuffle.partitions', 'auto')
+# We use the row number to give an identity key to each wallet. We UNION the two columns to ensure we are getting ever possible address.
+# We reference the previously created silver table to query from relevant transactions & transactions from posted date.
 sql_statement = """
 SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) as WalletID, WalletHash FROM
     (SELECT DISTINCT C AS WalletHash FROM
@@ -75,18 +130,28 @@ SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) as WalletID, WalletHash FROM
         UNION
         (SELECT to_address as C FROM G01_db.SilverTable_ERC20Transactions))
 """
-
 df = spark.sql(sql_statement)
+contracts_df = spark.sql(r"SELECT address FROM silver_contracts WHERE is_erc20='True'")
+df = df.join(contracts_df, (df.WalletHash == contracts_df.address), 'left_anti').select('WalletID', 'WalletHash')
 
-df.write.mode('overwrite').option('mergeSchema', 'true').saveAsTable('G01_db.SilverTable_ExternalWallets')
+expected_ddl_schema = "WalletID Integer, WalletHash String"
+assert df.schema == _parse_datatype_string(expected_ddl_schema), "Incorrect Silver External Wallets schema"
+print("Assertion passed.")
+
+df.write.mode('overwrite').option('mergeSchema', 'true').format('delta').saveAsTable('G01_db.SilverTable_ExternalWallets')
+
+# COMMAND ----------
+
+spark.sql("OPTIMIZE G01_db.SilverTable_ExternalWallets ZORDER BY (WalletID)")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Lkp_EthereumTokens
+# MAGIC ## Lkp_EthereumTokens
 
 # COMMAND ----------
 
+# We use the row number to give an identity key to each token. We select distinct to remove any possible duplicates. We select only ethereum tokens & capture meta data
 sql_statement = """
 SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS TokenID, * FROM 
     (SELECT DISTINCT contract_address, symbol, name, description, links, image, price_usd 
@@ -96,17 +161,28 @@ SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS TokenID, * FROM
 
 df = spark.sql(sql_statement)
 
-df.write.mode('overwrite').option('mergeSchema', 'true').saveAsTable('G01_db.SilverTable_EthereumTokens')
+expected_ddl_schema = "TokenID Integer, contract_address String, symbol String, name String, description String, links String, image String, price_usd Double"
+assert df.schema == _parse_datatype_string(expected_ddl_schema), "Incorrect Silver Ethereum Tokens schema"
+print("Assertion passed.")
+
+df.write.mode('overwrite').option('mergeSchema', 'true').format('delta').saveAsTable('G01_db.SilverTable_EthereumTokens')
+
+# COMMAND ----------
+
+spark.sql("OPTIMIZE G01_db.SilverTable_EthereumTokens ZORDER BY (TokenID)")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Token Balance from Genesis
+# MAGIC ## Token Balance from Genesis
 
 # COMMAND ----------
 
-sqlContext.setConf('spark.sql.shuffle.partitions', 'auto')
-from pyspark.sql.functions import col, coalesce
+# Strategy: Select to projects: (1) Negate the USDValue with addresses to the from address feature and (2) positive the USDValue with addresses to the to address feature
+#           Then, do an outer join of these two tables, coalesce the to and from addresses to ensure we have a column with wallet address.
+#           Then, do a left anti join with the contracts table to remove any contract addresses
+#           Then, remove the meta information with identity ID of both meta tables
+#           Drop any NULLS for safety
 
 # It is less expensive to get Wallet ID after the computations because the inner join is expensive
 sql_statement = """
@@ -123,25 +199,62 @@ SELECT to_address, token_address AS to_token_address, SUM(USDValue) AS Total_To_
 """
 
 to_df = spark.sql(sql_statement)
+contracts_df = spark.sql(r"SELECT address FROM silver_contracts WHERE is_erc20='True'")
 
 df = from_df.join(to_df, ((from_df.from_address == to_df.to_address) & (from_df.from_token_address == to_df.to_token_address)), 'full')
 df = df.na.fill(0, ['Total_To_Value']).na.fill(0, ['Total_From_Value'])
 df = df.withColumn('Balance', col('Total_From_Value')+col('Total_To_Value'))
 
-df = df.withColumn('WalletAddress', coalesce(df['from_address'], df['to_address']))
+df = df.withColumn('Walletaddress', coalesce(df['from_address'], df['to_address']))
 df = df.withColumn('TokenAddress', coalesce(df['from_token_address'], df['to_token_address']))
 df = df.drop(*('from_address', 'to_address', 'from_token_address', 'to_token_address'))
+df = df.join(contracts_df, (df.Walletaddress == contracts_df.address), 'left_anti')
+
 
 token_lkp_df = spark.sql('SELECT * FROM G01_db.SilverTable_EthereumTokens')
 wallet_lkp_df = spark.sql('SELECT * FROM G01_db.SilverTable_ExternalWallets')
 
 df = df.join(token_lkp_df, (df.TokenAddress == token_lkp_df.contract_address), 'inner')
-df = df.join(wallet_lkp_df, (df.WalletAddress == wallet_lkp_df.WalletHash), 'inner')
-df = df.drop(*('Total_From_Value', 'Total_To_Value', 'WalletAddress', 'TokenAddress', 'contract_address', 'symbol', 'name', 'description', 'links', 'image', 'price_usd', 'WalletHash'))
+df = df.join(wallet_lkp_df, (df.Walletaddress == wallet_lkp_df.WalletHash), 'inner')
+df = df.drop(*('Total_From_Value', 'Total_To_Value', 'Walletaddress', 'TokenAddress', 'contract_address', 'symbol', 'name', 'description', 'links', 'image', 'price_usd', 'WalletHash', 'address'))
+df = df.na.drop()
+df = df.withColumn('Balance', df.Balance.cast('integer'))
 
-df.write.mode('overwrite').option('overwriteSchema', 'true').saveAsTable('G01_db.SilverTable_WalletBalance')
+assert df.schema == _parse_datatype_string("Balance Integer, TokenID Integer, WalletID Integer"), "Incorrect Silver Wallet Balance schema"
+print("Assertion passed.")
+
+df.write.mode('overwrite').option('overwriteSchema', 'true').format('delta').saveAsTable('G01_db.SilverTable_WalletBalance')
+
+# COMMAND ----------
+
+spark.sql("OPTIMIZE G01_db.SilverTable_WalletBalance ZORDER BY (TokenID)")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Display Table History
+
+# COMMAND ----------
+
+display(DeltaTable.forPath(spark, '/user/hive/warehouse/g01_db.db/silvertable_erc20transactions/').history())
+
+# COMMAND ----------
+
+display(DeltaTable.forPath(spark, '/user/hive/warehouse/g01_db.db/silvertable_externalwallets/').history())
+
+# COMMAND ----------
+
+display(DeltaTable.forPath(spark, '/user/hive/warehouse/g01_db.db/silvertable_ethereumtokens/').history())
+
+# COMMAND ----------
+
+display(DeltaTable.forPath(spark, '/user/hive/warehouse/g01_db.db/silvertable_walletbalance/').history())
 
 # COMMAND ----------
 
 # Return Success
 dbutils.notebook.exit(json.dumps({"exit_code": "OK"}))
+
+# COMMAND ----------
+
+
